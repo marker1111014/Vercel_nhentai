@@ -130,8 +130,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         if gallery_url:
             logger.info(f"找到有效連結: {gallery_url}")
-            # 先回覆確認收到
-            await update.message.reply_text("🔄 正在處理您的請求...")
             
             try:
                 logger.info("開始獲取標題")
@@ -207,3 +205,4 @@ async def set_webhook_endpoint():
         logger.error(f"設定 Webhook 時發生錯誤: {e}")
         logger.error(traceback.format_exc())
         return {"status": "error", "message": str(e)}
+
