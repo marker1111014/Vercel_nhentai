@@ -2,6 +2,7 @@
 import os
 import re
 import requests
+import logging
 from bs4 import BeautifulSoup
 from telegram import Update
 from telegram.ext import Application, MessageHandler, filters, ContextTypes
@@ -9,6 +10,13 @@ from dotenv import load_dotenv
 import urllib.parse
 from fastapi import FastAPI, Request
 from fastapi.responses import PlainTextResponse
+
+# 設置日誌
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO
+)
+logger = logging.getLogger(__name__)
 
 # 載入環境變數
 load_dotenv()
@@ -41,7 +49,7 @@ def filter_title(title):
         title = re.sub(r'[\[\]【】\(\)（）\s]+$', '', title)
         return title if title else original_title
     except Exception as e:
-        print(f"過濾標題時發生錯誤: {e}")
+        logger.error(f"過濾標題時發生錯誤: {e}")
         return original_title
 
 # 搜索 nhentai 中文版
@@ -67,7 +75,7 @@ def search_nhentai_chinese(title):
                     return f"https://nhentai.net{href}" if href.startswith('/') else f"https://nhentai.net/g/{href}"
         return None
     except Exception as e:
-        print(f"搜索 nhentai 時發生錯誤: {e}")
+        logger.error(f"搜索 nhentai 時發生錯誤: {e}")
         return None
 
 # 獲取標題
@@ -98,33 +106,55 @@ def get_gallery_title(url):
             return {'original': original, 'filtered': filter_title(original)}
         return {'original': "無法獲取標題", 'filtered': "無法獲取標題"}
     except Exception as e:
-        print(f"獲取標題時發生錯誤: {e}")
+        logger.error(f"獲取標題時發生錯誤: {e}")
         return {'original': "獲取標題失敗", 'filtered': "獲取標題失敗"}
+
+# 錯誤處理器
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
+    """記錄錯誤並發送訊息到管理員"""
+    logger.error("處理更新時發生錯誤", exc_info=context.error)
+    
+    # 如果是 Telegram 錯誤，可以選擇發送錯誤訊息給用戶
+    if isinstance(update, Update) and update.effective_message:
+        try:
+            await update.effective_message.reply_text("處理您的請求時發生錯誤，請稍後再試。")
+        except:
+            pass
 
 # 處理訊息
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    message_text = update.message.text
-    gallery_url = is_valid_gallery_url(message_text)
-    if gallery_url:
-        processing_message = await update.message.reply_text("正在獲取漫畫標題...")
-        try:
-            title_info = get_gallery_title(gallery_url)
-            response_text = f"🇯🇵 原始標題：\n{title_info['original']}\n\n"
-            response_text += f"🎯 過濾後標題：\n{title_info['filtered']}\n\n"
-            await processing_message.edit_text("正在搜索 nhentai（中文版）...")
-            nhentai_link = search_nhentai_chinese(title_info['filtered'])
-            if nhentai_link:
-                response_text += f"🔗 nhentai 中文版：\n{nhentai_link}"
-            else:
-                response_text += "❌ 在 nhentai 找不到中文版結果"
-            await processing_message.edit_text(response_text)
-        except Exception as e:
-            await processing_message.edit_text("獲取標題時發生錯誤，請稍後再試。")
+    try:
+        if not update.message or not update.message.text:
+            return
+            
+        message_text = update.message.text
+        gallery_url = is_valid_gallery_url(message_text)
+        
+        if gallery_url:
+            processing_message = await update.message.reply_text("正在獲取漫畫標題...")
+            try:
+                title_info = get_gallery_title(gallery_url)
+                response_text = f"🇯🇵 原始標題：\n{title_info['original']}\n\n"
+                response_text += f"🎯 過濾後標題：\n{title_info['filtered']}\n\n"
+                await processing_message.edit_text("正在搜索 nhentai（中文版）...")
+                nhentai_link = search_nhentai_chinese(title_info['filtered'])
+                if nhentai_link:
+                    response_text += f"🔗 nhentai 中文版：\n{nhentai_link}"
+                else:
+                    response_text += "❌ 在 nhentai 找不到中文版結果"
+                await processing_message.edit_text(response_text)
+            except Exception as e:
+                logger.error(f"處理訊息時發生錯誤: {e}")
+                await processing_message.edit_text("獲取標題時發生錯誤，請稍後再試。")
+    except Exception as e:
+        logger.error(f"handle_message 發生錯誤: {e}")
 
 # 初始化 Telegram Bot
 def init_bot():
     app = Application.builder().token(BOT_TOKEN).build()
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    # 註冊錯誤處理器
+    app.add_error_handler(error_handler)
     return app
 
 # FastAPI App
@@ -133,11 +163,15 @@ bot_app = init_bot()
 
 @app.post("/webhook")
 async def webhook(request: Request):
-    data = await request.json()
-    update = Update.de_json(data, bot_app.bot)
-    await bot_app.initialize()
-    await bot_app.process_update(update)
-    return {"status": "ok"}
+    try:
+        data = await request.json()
+        update = Update.de_json(data, bot_app.bot)
+        await bot_app.initialize()
+        await bot_app.process_update(update)
+        return {"status": "ok"}
+    except Exception as e:
+        logger.error(f"Webhook 處理錯誤: {e}")
+        return {"status": "error"}
 
 @app.get("/")
 def root():
@@ -146,4 +180,9 @@ def root():
 # 設定 Webhook（只在本地或部署時執行一次）
 @app.on_event("startup")
 async def set_webhook():
-    await bot_app.bot.set_webhook(WEBHOOK_URL)
+    try:
+        await bot_app.initialize()
+        await bot_app.bot.set_webhook(WEBHOOK_URL)
+        logger.info(f"Webhook 設定成功: {WEBHOOK_URL}")
+    except Exception as e:
+        logger.error(f"設定 Webhook 時發生錯誤: {e}")
