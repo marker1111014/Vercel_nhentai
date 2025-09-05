@@ -26,18 +26,16 @@ BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 IPB_MEMBER_ID = os.getenv('IPB_MEMBER_ID')
 IPB_PASS_HASH = os.getenv('IPB_PASS_HASH')
 IGNEOUS = os.getenv('IGNEOUS')
-WEBHOOK_URL = os.getenv('WEBHOOK_URL')  # 例如：https://your-project.vercel.app/webhook
+WEBHOOK_URL = os.getenv('WEBHOOK_URL')
 
-# 全局變量
+# 全局 Bot 應用
 bot_app = None
 
-# 檢查是否為有效的 e-hentai 或 exhentai 連結
 def is_valid_gallery_url(text):
     pattern = r'https?://(?:e-hentai\.org|exhentai\.org)/g/[\w\-]+/\w+/?'
     match = re.search(pattern, text)
     return match.group(0) if match else None
 
-# 過濾標題
 def filter_title(title):
     if not title:
         return ""
@@ -55,7 +53,6 @@ def filter_title(title):
         logger.error(f"過濾標題時發生錯誤: {e}")
         return original_title
 
-# 搜索 nhentai 中文版
 def search_nhentai_chinese(title):
     try:
         if not title:
@@ -81,7 +78,6 @@ def search_nhentai_chinese(title):
         logger.error(f"搜索 nhentai 時發生錯誤: {e}")
         return None
 
-# 獲取標題
 def get_gallery_title(url):
     try:
         headers = {
@@ -94,7 +90,7 @@ def get_gallery_title(url):
                 'ipb_pass_hash': IPB_PASS_HASH,
                 'igneous': IGNEOUS
             }
-        response = requests.get(url, headers=headers, cookies=cookies, timeout=10)
+        response = requests.get(url, headers=headers, cookies=cookies, timeout=15)
         response.raise_for_status()
         soup = BeautifulSoup(response.text, 'html.parser')
         title_element = soup.find('h1', id='gn')
@@ -112,19 +108,6 @@ def get_gallery_title(url):
         logger.error(f"獲取標題時發生錯誤: {e}")
         return {'original': "獲取標題失敗", 'filtered': "獲取標題失敗"}
 
-# 錯誤處理器
-async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
-    """記錄錯誤並發送訊息到管理員"""
-    logger.error("處理更新時發生錯誤", exc_info=context.error)
-    
-    # 如果是 Telegram 錯誤，可以選擇發送錯誤訊息給用戶
-    if isinstance(update, Update) and update.effective_message:
-        try:
-            await update.effective_message.reply_text("處理您的請求時發生錯誤，請稍後再試。")
-        except:
-            pass
-
-# 處理訊息
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         if not update.message or not update.message.text:
@@ -134,33 +117,33 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         gallery_url = is_valid_gallery_url(message_text)
         
         if gallery_url:
-            processing_message = await update.message.reply_text("正在獲取漫畫標題...")
+            # 先回覆訊息，避免 Telegram 認為沒有響應
+            await update.message.reply_text("收到請求，正在處理...")
+            
             try:
                 title_info = get_gallery_title(gallery_url)
                 response_text = f"🇯🇵 原始標題：\n{title_info['original']}\n\n"
                 response_text += f"🎯 過濾後標題：\n{title_info['filtered']}\n\n"
-                await processing_message.edit_text("正在搜索 nhentai（中文版）...")
+                
                 nhentai_link = search_nhentai_chinese(title_info['filtered'])
                 if nhentai_link:
                     response_text += f"🔗 nhentai 中文版：\n{nhentai_link}"
                 else:
                     response_text += "❌ 在 nhentai 找不到中文版結果"
-                await processing_message.edit_text(response_text)
+                
+                await update.message.reply_text(response_text)
             except Exception as e:
                 logger.error(f"處理訊息時發生錯誤: {e}")
-                await processing_message.edit_text("獲取標題時發生錯誤，請稍後再試。")
+                await update.message.reply_text("獲取標題時發生錯誤，請稍後再試。")
     except Exception as e:
         logger.error(f"handle_message 發生錯誤: {e}")
 
-# 初始化 Telegram Bot
-async def init_bot():
+async def get_bot_app():
     global bot_app
     if bot_app is None:
         logger.info("初始化 Telegram Bot...")
         bot_app = Application.builder().token(BOT_TOKEN).build()
         bot_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-        # 註冊錯誤處理器
-        bot_app.add_error_handler(error_handler)
         await bot_app.initialize()
         logger.info("Telegram Bot 初始化完成")
     return bot_app
@@ -171,15 +154,18 @@ app = FastAPI()
 @app.post("/webhook")
 async def webhook(request: Request):
     try:
-        # 確保 Bot 已經初始化
-        app_instance = await init_bot()
+        # 獲取 Bot 實例
+        app_instance = await get_bot_app()
         
-        # 解析更新
+        # 解析更新數據
         data = await request.json()
         update = Update.de_json(data, app_instance.bot)
         
-        # 處理更新
-        await app_instance.process_update(update)
+        # 在新任務中處理更新，立即返回響應
+        import asyncio
+        asyncio.create_task(app_instance.process_update(update))
+        
+        # 立即返回成功響應
         return {"status": "ok"}
     except Exception as e:
         logger.error(f"Webhook 處理錯誤: {e}")
@@ -187,15 +173,12 @@ async def webhook(request: Request):
 
 @app.get("/")
 def root():
-    return PlainTextResponse("Telegram Bot is running here")
+    return PlainTextResponse("Telegram Bot Webhook Server")
 
-# 設定 Webhook
 @app.on_event("startup")
 async def startup_event():
     try:
-        # 初始化 Bot
-        app_instance = await init_bot()
-        # 設定 webhook
+        app_instance = await get_bot_app()
         await app_instance.bot.set_webhook(WEBHOOK_URL)
         logger.info(f"Webhook 設定成功: {WEBHOOK_URL}")
     except Exception as e:
