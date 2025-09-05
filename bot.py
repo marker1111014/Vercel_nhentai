@@ -28,6 +28,9 @@ IPB_PASS_HASH = os.getenv('IPB_PASS_HASH')
 IGNEOUS = os.getenv('IGNEOUS')
 WEBHOOK_URL = os.getenv('WEBHOOK_URL')  # 例如：https://your-project.vercel.app/webhook
 
+# 全局變量
+bot_app = None
+
 # 檢查是否為有效的 e-hentai 或 exhentai 連結
 def is_valid_gallery_url(text):
     pattern = r'https?://(?:e-hentai\.org|exhentai\.org)/g/[\w\-]+/\w+/?'
@@ -150,24 +153,33 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"handle_message 發生錯誤: {e}")
 
 # 初始化 Telegram Bot
-def init_bot():
-    app = Application.builder().token(BOT_TOKEN).build()
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    # 註冊錯誤處理器
-    app.add_error_handler(error_handler)
-    return app
+async def init_bot():
+    global bot_app
+    if bot_app is None:
+        logger.info("初始化 Telegram Bot...")
+        bot_app = Application.builder().token(BOT_TOKEN).build()
+        bot_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+        # 註冊錯誤處理器
+        bot_app.add_error_handler(error_handler)
+        await bot_app.initialize()
+        logger.info("Telegram Bot 初始化完成")
+    return bot_app
 
 # FastAPI App
 app = FastAPI()
-bot_app = init_bot()
 
 @app.post("/webhook")
 async def webhook(request: Request):
     try:
+        # 確保 Bot 已經初始化
+        app_instance = await init_bot()
+        
+        # 解析更新
         data = await request.json()
-        update = Update.de_json(data, bot_app.bot)
-        await bot_app.initialize()
-        await bot_app.process_update(update)
+        update = Update.de_json(data, app_instance.bot)
+        
+        # 處理更新
+        await app_instance.process_update(update)
         return {"status": "ok"}
     except Exception as e:
         logger.error(f"Webhook 處理錯誤: {e}")
@@ -177,12 +189,14 @@ async def webhook(request: Request):
 def root():
     return PlainTextResponse("Telegram Bot is running here")
 
-# 設定 Webhook（只在本地或部署時執行一次）
+# 設定 Webhook
 @app.on_event("startup")
-async def set_webhook():
+async def startup_event():
     try:
-        await bot_app.initialize()
-        await bot_app.bot.set_webhook(WEBHOOK_URL)
+        # 初始化 Bot
+        app_instance = await init_bot()
+        # 設定 webhook
+        await app_instance.bot.set_webhook(WEBHOOK_URL)
         logger.info(f"Webhook 設定成功: {WEBHOOK_URL}")
     except Exception as e:
         logger.error(f"設定 Webhook 時發生錯誤: {e}")
