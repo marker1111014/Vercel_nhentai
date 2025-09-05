@@ -10,6 +10,8 @@ from dotenv import load_dotenv
 import urllib.parse
 from fastapi import FastAPI, Request
 from fastapi.responses import PlainTextResponse
+import asyncio
+import traceback
 
 # 設置日誌
 logging.basicConfig(
@@ -28,9 +30,6 @@ IPB_PASS_HASH = os.getenv('IPB_PASS_HASH')
 IGNEOUS = os.getenv('IGNEOUS')
 WEBHOOK_URL = os.getenv('WEBHOOK_URL')
 
-# 全局 Bot 應用
-bot_app = None
-
 def is_valid_gallery_url(text):
     pattern = r'https?://(?:e-hentai\.org|exhentai\.org)/g/[\w\-]+/\w+/?'
     match = re.search(pattern, text)
@@ -39,7 +38,6 @@ def is_valid_gallery_url(text):
 def filter_title(title):
     if not title:
         return ""
-    original_title = title
     try:
         title = re.sub(r'\[[^\]]*\]', '', title)
         title = re.sub(r'【[^】]*】', '', title)
@@ -48,10 +46,10 @@ def filter_title(title):
         title = re.sub(r'\s+', ' ', title).strip()
         title = re.sub(r'^[\[\]【】\(\)（）\s]+', '', title)
         title = re.sub(r'[\[\]【】\(\)（）\s]+$', '', title)
-        return title if title else original_title
+        return title if title else "無標題"
     except Exception as e:
         logger.error(f"過濾標題時發生錯誤: {e}")
-        return original_title
+        return title
 
 def search_nhentai_chinese(title):
     try:
@@ -66,13 +64,14 @@ def search_nhentai_chinese(title):
         response.raise_for_status()
         soup = BeautifulSoup(response.text, 'html.parser')
         galleries = soup.find_all('div', class_='gallery')
-        for gallery in galleries:
+        for gallery in galleries[:5]:  # 只檢查前5個結果
             caption = gallery.find('div', class_='caption')
             if caption and '[Chinese]' in caption.get_text():
                 link = gallery.find('a')
                 if link:
                     href = link.get('href')
-                    return f"https://nhentai.net{href}" if href.startswith('/') else f"https://nhentai.net/g/{href}"
+                    full_url = f"https://nhentai.net{href}" if href.startswith('/') else href
+                    return full_url
         return None
     except Exception as e:
         logger.error(f"搜索 nhentai 時發生錯誤: {e}")
@@ -85,13 +84,22 @@ def get_gallery_title(url):
         }
         cookies = {}
         if 'exhentai.org' in url:
-            cookies = {
-                'ipb_member_id': IPB_MEMBER_ID,
-                'ipb_pass_hash': IPB_PASS_HASH,
-                'igneous': IGNEOUS
-            }
+            if IPB_MEMBER_ID and IPB_PASS_HASH:
+                cookies = {
+                    'ipb_member_id': IPB_MEMBER_ID,
+                    'ipb_pass_hash': IPB_PASS_HASH,
+                    'igneous': IGNEOUS or ''
+                }
+            else:
+                logger.warning("缺少 ExHentai cookies")
+        
+        logger.info(f"正在請求: {url}")
         response = requests.get(url, headers=headers, cookies=cookies, timeout=15)
-        response.raise_for_status()
+        logger.info(f"請求狀態碼: {response.status_code}")
+        
+        if response.status_code != 200:
+            return {'original': f"無法訪問頁面 (狀態碼: {response.status_code})", 'filtered': "無法獲取標題"}
+            
         soup = BeautifulSoup(response.text, 'html.parser')
         title_element = soup.find('h1', id='gn')
         if title_element:
@@ -106,47 +114,51 @@ def get_gallery_title(url):
         return {'original': "無法獲取標題", 'filtered': "無法獲取標題"}
     except Exception as e:
         logger.error(f"獲取標題時發生錯誤: {e}")
-        return {'original': "獲取標題失敗", 'filtered': "獲取標題失敗"}
+        logger.error(traceback.format_exc())
+        return {'original': f"獲取標題失敗: {str(e)}", 'filtered': "獲取標題失敗"}
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
+        logger.info("收到訊息")
         if not update.message or not update.message.text:
+            logger.info("訊息為空或沒有文字")
             return
             
         message_text = update.message.text
+        logger.info(f"訊息內容: {message_text}")
         gallery_url = is_valid_gallery_url(message_text)
         
         if gallery_url:
-            # 先回覆訊息，避免 Telegram 認為沒有響應
-            await update.message.reply_text("收到請求，正在處理...")
+            logger.info(f"找到有效連結: {gallery_url}")
+            # 先回覆確認收到
+            await update.message.reply_text("🔄 正在處理您的請求...")
             
             try:
+                logger.info("開始獲取標題")
                 title_info = get_gallery_title(gallery_url)
+                logger.info(f"獲取到標題: {title_info}")
+                
                 response_text = f"🇯🇵 原始標題：\n{title_info['original']}\n\n"
                 response_text += f"🎯 過濾後標題：\n{title_info['filtered']}\n\n"
                 
+                logger.info("開始搜索 nhentai")
                 nhentai_link = search_nhentai_chinese(title_info['filtered'])
                 if nhentai_link:
                     response_text += f"🔗 nhentai 中文版：\n{nhentai_link}"
                 else:
                     response_text += "❌ 在 nhentai 找不到中文版結果"
                 
+                logger.info("發送最終回覆")
                 await update.message.reply_text(response_text)
             except Exception as e:
                 logger.error(f"處理訊息時發生錯誤: {e}")
-                await update.message.reply_text("獲取標題時發生錯誤，請稍後再試。")
+                logger.error(traceback.format_exc())
+                await update.message.reply_text("❌ 處理請求時發生錯誤，請稍後再試。")
+        else:
+            logger.info("不是有效的畫廊連結")
     except Exception as e:
         logger.error(f"handle_message 發生錯誤: {e}")
-
-async def get_bot_app():
-    global bot_app
-    if bot_app is None:
-        logger.info("初始化 Telegram Bot...")
-        bot_app = Application.builder().token(BOT_TOKEN).build()
-        bot_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-        await bot_app.initialize()
-        logger.info("Telegram Bot 初始化完成")
-    return bot_app
+        logger.error(traceback.format_exc())
 
 # FastAPI App
 app = FastAPI()
@@ -154,32 +166,44 @@ app = FastAPI()
 @app.post("/webhook")
 async def webhook(request: Request):
     try:
-        # 獲取 Bot 實例
-        app_instance = await get_bot_app()
+        logger.info("收到 webhook 請求")
+        
+        # 創建新的應用實例（每次都創建新的）
+        application = Application.builder().token(BOT_TOKEN).build()
+        application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
         
         # 解析更新數據
         data = await request.json()
-        update = Update.de_json(data, app_instance.bot)
+        logger.info(f"收到數據: {data}")
+        update = Update.de_json(data, application.bot)
         
-        # 在新任務中處理更新，立即返回響應
-        import asyncio
-        asyncio.create_task(app_instance.process_update(update))
+        # 初始化並處理更新
+        await application.initialize()
+        await application.process_update(update)
+        await application.shutdown()
         
-        # 立即返回成功響應
+        logger.info("webhook 處理完成")
         return {"status": "ok"}
     except Exception as e:
         logger.error(f"Webhook 處理錯誤: {e}")
+        logger.error(traceback.format_exc())
         return {"status": "error"}
 
 @app.get("/")
 def root():
-    return PlainTextResponse("Telegram Bot Webhook Server")
+    return PlainTextResponse("Telegram Bot Webhook Server is running")
 
-@app.on_event("startup")
-async def startup_event():
+@app.get("/set_webhook")
+async def set_webhook_endpoint():
     try:
-        app_instance = await get_bot_app()
-        await app_instance.bot.set_webhook(WEBHOOK_URL)
+        # 創建臨時應用來設定 webhook
+        temp_app = Application.builder().token(BOT_TOKEN).build()
+        await temp_app.initialize()
+        await temp_app.bot.set_webhook(WEBHOOK_URL)
+        await temp_app.shutdown()
         logger.info(f"Webhook 設定成功: {WEBHOOK_URL}")
+        return {"status": "webhook set successfully"}
     except Exception as e:
         logger.error(f"設定 Webhook 時發生錯誤: {e}")
+        logger.error(traceback.format_exc())
+        return {"status": "error", "message": str(e)}
