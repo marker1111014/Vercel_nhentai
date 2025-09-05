@@ -39,17 +39,58 @@ def filter_title(title):
     if not title:
         return ""
     try:
+        original_title = title
+        
+        # 移除方括號內容 [xxxxx]
         title = re.sub(r'\[[^\]]*\]', '', title)
+        
+        # 移除全形方括號內容 【xxxxx】
         title = re.sub(r'【[^】]*】', '', title)
+        
+        # 移除圓括號內容 (xxxxx)
         title = re.sub(r'\([^\)]*\)', '', title)
+        
+        # 移除全形圓括號內容 （xxxxx）
         title = re.sub(r'（[^）]*）', '', title)
+        
+        # 移除尖括號內容 <xxxxx>
+        title = re.sub(r'<[^>]*>', '', title)
+        
+        # 移除全形尖括號內容 《xxxxx》
+        title = re.sub(r'《[^》]*》', '', title)
+        
+        # 移除花括號內容 {xxxxx}
+        title = re.sub(r'\{[^}]*\}', '', title)
+        
+        # 移除全形花括號內容 ｛xxxxx｝
+        title = re.sub(r'｛[^｝]*｝', '', title)
+        
+        # 清理多餘的空白字符
         title = re.sub(r'\s+', ' ', title).strip()
-        title = re.sub(r'^[\[\]【】\(\)（）\s]+', '', title)
-        title = re.sub(r'[\[\]【】\(\)（）\s]+$', '', title)
-        return title if title else "無標題"
+        
+        # 移除開頭的標點符號和空白
+        title = re.sub(r'^[\[\]【】\(\)（）\<\>《》\{\}｛｝\s\|\-\–—]+', '', title)
+        
+        # 移除結尾的標點符號和空白
+        title = re.sub(r'[\[\]【】\(\)（）\<\>《》\{\}｛｝\s\|\-\–—]+$', '', title)
+        
+        # 處理 "|" 符號，只保留前面的部分（如果有的話）
+        if '|' in title:
+            parts = title.split('|')
+            # 如果第一部分有內容，使用第一部分；否則使用處理後的完整標題
+            if parts[0].strip():
+                title = parts[0].strip()
+            else:
+                title = title.split('|')[0].strip()
+        
+        # 如果處理後為空，返回原始標題
+        if not title:
+            return original_title.strip()
+            
+        return title
     except Exception as e:
         logger.error(f"過濾標題時發生錯誤: {e}")
-        return title
+        return original_title if 'original_title' in locals() else title
 
 def search_nhentai_chinese(title):
     try:
@@ -205,4 +246,5 @@ async def set_webhook_endpoint():
         logger.error(f"設定 Webhook 時發生錯誤: {e}")
         logger.error(traceback.format_exc())
         return {"status": "error", "message": str(e)}
+
 
